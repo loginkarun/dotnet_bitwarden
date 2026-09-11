@@ -9,153 +9,450 @@ on:
         default: "main"
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   generate-scip:
+    name: Generate SCIP Index
     runs-on: ubuntu-22.04
 
     steps:
+
+      # ------------------------------------------------------------
+      # 1. Checkout requested branch
+      # ------------------------------------------------------------
+
       - name: Checkout requested branch
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.branch }}
           fetch-depth: 0
 
-      - name: Verify branch
+      # ------------------------------------------------------------
+      # 2. Verify branch / commit
+      # ------------------------------------------------------------
+
+      - name: Verify checkout
+        shell: bash
         run: |
+          echo "Requested branch:"
+          echo "${{ inputs.branch }}"
+
+          echo ""
           echo "Current branch:"
           git branch --show-current
 
+          echo ""
           echo "Current commit:"
           git rev-parse HEAD
 
+          echo ""
+          echo "Repository root:"
+          pwd
+
+      # ------------------------------------------------------------
+      # 3. Show .NET environment
+      # ------------------------------------------------------------
+
       - name: Show .NET information
+        shell: bash
         run: |
           dotnet --info
 
+          echo ""
+          echo "global.json:"
+          if [ -f "global.json" ]; then
+            cat global.json
+          else
+            echo "No global.json found in repository root"
+          fi
+
+      # ------------------------------------------------------------
+      # 4. Install SCIP .NET indexer
+      # ------------------------------------------------------------
+
       - name: Install scip-dotnet
+        shell: bash
         run: |
           dotnet tool install --global scip-dotnet
 
       - name: Verify scip-dotnet
-        run: |
-          scip-dotnet --version
-
-      - name: Find solution or project
-        id: dotnet
         shell: bash
         run: |
-          echo "Looking for .NET solution/project files..."
+          echo "SCIP .NET version:"
+          scip-dotnet --version
 
-          # Prefer the known Bitwarden solution manifest
-          if [ -f "bitwarden-server.slnx" ]; then
-            echo "Found bitwarden-server.slnx"
+      # ------------------------------------------------------------
+      # 5. Discover repository .NET structure
+      # ------------------------------------------------------------
 
-            echo "target=bitwarden-server.slnx" >> "$GITHUB_OUTPUT"
-            echo "root=." >> "$GITHUB_OUTPUT"
+      - name: Discover .NET files
+        shell: bash
+        run: |
+          echo "=================================================="
+          echo "Solution files"
+          echo "=================================================="
 
-            exit 0
-          fi
-
-          # Otherwise find nearest .sln or .slnx
-          SOLUTION=$(find . \
+          find . \
             -not -path "./.git/*" \
             -not -path "./.aava/*" \
+            -not -path "./.aava-temp/*" \
+            -not -path "*/bin/*" \
+            -not -path "*/obj/*" \
+            -not -path "*/node_modules/*" \
             \( -name "*.sln" -o -name "*.slnx" \) \
-            -print 2>/dev/null \
+            -print | sort
+
+          echo ""
+          echo "=================================================="
+          echo "Project files"
+          echo "=================================================="
+
+          find . \
+            -not -path "./.git/*" \
+            -not -path "./.aava/*" \
+            -not -path "./.aava-temp/*" \
+            -not -path "*/bin/*" \
+            -not -path "*/obj/*" \
+            -not -path "*/node_modules/*" \
+            \( -name "*.csproj" -o -name "*.vbproj" \) \
+            -print | sort
+
+      # ------------------------------------------------------------
+      # 6. Select or construct a SCIP-compatible solution
+      #
+      # scip-dotnet currently understands:
+      #
+      #   .sln
+      #   .csproj
+      #   .vbproj
+      #
+      # but not .slnx.
+      #
+      # Therefore:
+      #
+      # 1. Use existing .sln if available.
+      # 2. Otherwise dynamically create a traditional .sln
+      #    containing discovered projects.
+      # ------------------------------------------------------------
+
+      - name: Prepare SCIP target
+        id: sciptarget
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Looking for traditional .sln file..."
+
+          EXISTING_SLN=$(find . \
+            -not -path "./.git/*" \
+            -not -path "./.aava/*" \
+            -not -path "./.aava-temp/*" \
+            -not -path "*/bin/*" \
+            -not -path "*/obj/*" \
+            -not -path "*/node_modules/*" \
+            -name "*.sln" \
+            -print \
+            | sort \
             | head -n 1)
 
-          if [ -n "$SOLUTION" ]; then
-            echo "Selected solution: $SOLUTION"
+          # --------------------------------------------------------
+          # Existing .sln found
+          # --------------------------------------------------------
 
-            echo "target=$SOLUTION" >> "$GITHUB_OUTPUT"
-            echo "root=$(dirname "$SOLUTION")" >> "$GITHUB_OUTPUT"
+          if [ -n "$EXISTING_SLN" ]; then
+
+            echo "Existing SCIP-compatible solution found:"
+            echo "$EXISTING_SLN"
+
+            echo "target=$EXISTING_SLN" >> "$GITHUB_OUTPUT"
+            echo "temporary=false" >> "$GITHUB_OUTPUT"
 
             exit 0
           fi
 
-          echo "No .sln or .slnx found. Looking for project files..."
+          # --------------------------------------------------------
+          # No .sln exists.
+          #
+          # This covers repositories containing:
+          #
+          #   *.slnx
+          #
+          # or simply multiple *.csproj / *.vbproj files.
+          # --------------------------------------------------------
 
-          PROJECT=$(find . \
-            -not -path "./.git/*" \
-            -not -path "./.aava/*" \
-            \( -name "*.csproj" -o -name "*.vbproj" \) \
-            -print 2>/dev/null \
-            | head -n 1)
+          echo ""
+          echo "No traditional .sln found."
+          echo "Creating temporary SCIP-compatible solution..."
 
-          if [ -z "$PROJECT" ]; then
-            echo "ERROR: No .sln, .slnx, .csproj, or .vbproj found"
+          mkdir -p .aava-temp
+
+          # Force traditional .sln format.
+          # This is important on newer .NET SDKs where `dotnet new sln`
+          # may otherwise default to .slnx.
+          dotnet new sln \
+            --name aava-index \
+            --format sln \
+            --output .aava-temp
+
+          TEMP_SOLUTION=".aava-temp/aava-index.sln"
+
+          if [ ! -f "$TEMP_SOLUTION" ]; then
+            echo "ERROR: Temporary solution was not created."
             exit 1
           fi
 
-          echo "Selected project: $PROJECT"
+          echo ""
+          echo "Temporary solution:"
+          echo "$TEMP_SOLUTION"
 
-          echo "target=$PROJECT" >> "$GITHUB_OUTPUT"
-          echo "root=$(dirname "$PROJECT")" >> "$GITHUB_OUTPUT"
+          # --------------------------------------------------------
+          # Find all C# / VB projects recursively.
+          #
+          # Exclude generated/dependency directories only.
+          #
+          # We intentionally keep test projects because this is a
+          # whole-repository code intelligence index.
+          # --------------------------------------------------------
 
-      - name: Show selected .NET target
+          mapfile -t PROJECTS < <(
+            find . \
+              -not -path "./.git/*" \
+              -not -path "./.aava/*" \
+              -not -path "./.aava-temp/*" \
+              -not -path "*/bin/*" \
+              -not -path "*/obj/*" \
+              -not -path "*/node_modules/*" \
+              -not -path "*/packages/*" \
+              \( -name "*.csproj" -o -name "*.vbproj" \) \
+              -print \
+              | sort
+          )
+
+          PROJECT_COUNT=${#PROJECTS[@]}
+
+          echo ""
+          echo "Projects discovered:"
+          echo "$PROJECT_COUNT"
+
+          if [ "$PROJECT_COUNT" -eq 0 ]; then
+            echo "ERROR: No .csproj or .vbproj files were found."
+            exit 1
+          fi
+
+          # --------------------------------------------------------
+          # Add every project to temporary traditional solution
+          # --------------------------------------------------------
+
+          ADDED=0
+
+          for PROJECT in "${PROJECTS[@]}"; do
+
+            echo "Adding:"
+            echo "  $PROJECT"
+
+            if dotnet sln "$TEMP_SOLUTION" add "$PROJECT"; then
+              ADDED=$((ADDED + 1))
+            else
+              echo "WARNING: Could not add project:"
+              echo "  $PROJECT"
+            fi
+
+          done
+
+          echo ""
+          echo "Successfully added projects:"
+          echo "$ADDED"
+
+          if [ "$ADDED" -eq 0 ]; then
+            echo "ERROR: No projects could be added to temporary solution."
+            exit 1
+          fi
+
+          echo ""
+          echo "Temporary solution contents:"
+          dotnet sln "$TEMP_SOLUTION" list
+
+          echo "target=$TEMP_SOLUTION" >> "$GITHUB_OUTPUT"
+          echo "temporary=true" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------
+      # 7. Show selected target
+      # ------------------------------------------------------------
+
+      - name: Show SCIP target
+        shell: bash
         run: |
-          echo "Restore target:"
-          echo "${{ steps.dotnet.outputs.target }}"
+          echo "SCIP target:"
+          echo "${{ steps.sciptarget.outputs.target }}"
 
-          echo "Index root:"
-          echo "${{ steps.dotnet.outputs.root }}"
+          echo ""
+          echo "Temporary solution:"
+          echo "${{ steps.sciptarget.outputs.temporary }}"
+
+      # ------------------------------------------------------------
+      # 8. Restore solution/projects
+      # ------------------------------------------------------------
 
       - name: Restore .NET dependencies
+        shell: bash
         run: |
-          dotnet restore "${{ steps.dotnet.outputs.target }}"
+          set -euo pipefail
+
+          TARGET="${{ steps.sciptarget.outputs.target }}"
+
+          echo "Restoring:"
+          echo "$TARGET"
+
+          dotnet restore "$TARGET"
+
+      # ------------------------------------------------------------
+      # 9. Remove any old locally generated index
+      # ------------------------------------------------------------
+
+      - name: Remove old SCIP output
+        shell: bash
+        run: |
+          find . \
+            -not -path "./.git/*" \
+            -not -path "./.aava/*" \
+            -name "index.scip" \
+            -type f \
+            -delete
+
+      # ------------------------------------------------------------
+      # 10. Generate SCIP index
+      # ------------------------------------------------------------
 
       - name: Generate SCIP index
         shell: bash
         run: |
-          echo "Repository root:"
+          set -euo pipefail
+
+          TARGET="${{ steps.sciptarget.outputs.target }}"
+
+          echo "=================================================="
+          echo "Generating SCIP index"
+          echo "=================================================="
+
+          echo "Repository:"
           pwd
 
-          echo "Selected index root:"
-          echo "${{ steps.dotnet.outputs.root }}"
+          echo ""
+          echo "SCIP target:"
+          echo "$TARGET"
 
-          echo "Available solution/project files:"
-          find . \
-            -maxdepth 3 \
-            -not -path "./.git/*" \
-            -not -path "./.aava/*" \
-            \( \
-              -name "*.sln" \
-              -o -name "*.slnx" \
-              -o -name "*.csproj" \
-              -o -name "*.vbproj" \
-            \) \
-            -print
+          echo ""
+          echo "Starting scip-dotnet..."
 
-          scip-dotnet index \
-            --working-directory "${{ steps.dotnet.outputs.root }}"
+          scip-dotnet index "$TARGET"
+
+          echo ""
+          echo "scip-dotnet completed."
+
+      # ------------------------------------------------------------
+      # 11. Locate generated index.scip
+      # ------------------------------------------------------------
 
       - name: Locate generated index.scip
         id: scip
         shell: bash
         run: |
-          echo "Searching for generated index.scip..."
+          set -euo pipefail
+
+          echo "Searching repository for generated index.scip..."
 
           INDEX=$(find . \
             -not -path "./.git/*" \
+            -not -path "./.aava/*" \
             -name "index.scip" \
+            -type f \
             -print \
             | head -n 1)
 
           if [ -z "$INDEX" ]; then
-            echo "ERROR: index.scip was not generated"
+
+            echo "ERROR: index.scip was not generated."
+
+            echo ""
+            echo "Files named *.scip:"
+            find . \
+              -not -path "./.git/*" \
+              -name "*.scip" \
+              -print || true
+
             exit 1
           fi
 
-          echo "SCIP index found:"
+          echo ""
+          echo "SCIP index successfully generated:"
           echo "$INDEX"
 
+          echo ""
+          echo "File information:"
           ls -lh "$INDEX"
 
+          SIZE=$(stat -c%s "$INDEX")
+
+          echo ""
+          echo "Size in bytes:"
+          echo "$SIZE"
+
+          if [ "$SIZE" -le 0 ]; then
+            echo "ERROR: Generated index.scip is empty."
+            exit 1
+          fi
+
           echo "index=$INDEX" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------
+      # 12. Upload index.scip
+      #
+      # For this step we are intentionally using an Actions artifact.
+      # Once indexing is confirmed working, we can change this to:
+      #
+      #   .aava/index.scip
+      #   .aava/index-metadata.json
+      #
+      # and commit them to the requested branch.
+      # ------------------------------------------------------------
 
       - name: Upload SCIP index
         uses: actions/upload-artifact@v4
         with:
-          name: index-scip
+          name: index-scip-${{ inputs.branch }}
           path: ${{ steps.scip.outputs.index }}
           if-no-files-found: error
+          retention-days: 7
+
+      # ------------------------------------------------------------
+      # 13. Final summary
+      # ------------------------------------------------------------
+
+      - name: Index summary
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "SCIP INDEX SUCCESS"
+          echo "========================================"
+
+          echo "Branch:"
+          echo "${{ inputs.branch }}"
+
+          echo ""
+          echo "SCIP target:"
+          echo "${{ steps.sciptarget.outputs.target }}"
+
+          echo ""
+          echo "Generated index:"
+          echo "${{ steps.scip.outputs.index }}"
+
+          echo ""
+          echo "Index size:"
+          echo "${{ steps.scip.outputs.size }} bytes"
+
+          echo ""
+          echo "Artifact:"
+          echo "index-scip-${{ inputs.branch }}"
