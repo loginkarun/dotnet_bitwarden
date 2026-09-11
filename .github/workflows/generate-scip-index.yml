@@ -40,50 +40,59 @@ jobs:
         run: |
           scip-dotnet --version
 
-      - name: Find solution
+      - name: Find solution or project
         id: dotnet
         shell: bash
         run: |
-          echo "Looking for solution files..."
-      
-          # Try .slnx first (solution manifest)
+          echo "Looking for .NET solution/project files..."
+
+          # Prefer the known Bitwarden solution manifest
           if [ -f "bitwarden-server.slnx" ]; then
             echo "Found bitwarden-server.slnx"
+
             echo "target=bitwarden-server.slnx" >> "$GITHUB_OUTPUT"
             echo "root=." >> "$GITHUB_OUTPUT"
+
             exit 0
           fi
-      
-          # Fallback to finding .sln or .slnx
+
+          # Otherwise find nearest .sln or .slnx
           SOLUTION=$(find . \
             -not -path "./.git/*" \
+            -not -path "./.aava/*" \
             \( -name "*.sln" -o -name "*.slnx" \) \
-            -print 2>/dev/null | head -n 1)
-      
-          if [ -z "$SOLUTION" ]; then
-            echo "No .sln or .slnx found. Looking for .csproj..."
-      
-            PROJECT=$(find . \
-              -not -path "./.git/*" \
-              -name "*.csproj" \
-              -print 2>/dev/null | head -n 1)
-      
-            if [ -z "$PROJECT" ]; then
-              echo "ERROR: No .sln, .slnx, or .csproj found"
-              exit 1
-            fi
-      
-            echo "target=$PROJECT" >> "$GITHUB_OUTPUT"
-            echo "root=$(dirname "$PROJECT")" >> "$GITHUB_OUTPUT"
-      
-          else
+            -print 2>/dev/null \
+            | head -n 1)
+
+          if [ -n "$SOLUTION" ]; then
             echo "Selected solution: $SOLUTION"
-      
+
             echo "target=$SOLUTION" >> "$GITHUB_OUTPUT"
             echo "root=$(dirname "$SOLUTION")" >> "$GITHUB_OUTPUT"
+
+            exit 0
           fi
 
-      - name: Show selected project
+          echo "No .sln or .slnx found. Looking for project files..."
+
+          PROJECT=$(find . \
+            -not -path "./.git/*" \
+            -not -path "./.aava/*" \
+            \( -name "*.csproj" -o -name "*.vbproj" \) \
+            -print 2>/dev/null \
+            | head -n 1)
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: No .sln, .slnx, .csproj, or .vbproj found"
+            exit 1
+          fi
+
+          echo "Selected project: $PROJECT"
+
+          echo "target=$PROJECT" >> "$GITHUB_OUTPUT"
+          echo "root=$(dirname "$PROJECT")" >> "$GITHUB_OUTPUT"
+
+      - name: Show selected .NET target
         run: |
           echo "Restore target:"
           echo "${{ steps.dotnet.outputs.target }}"
@@ -96,36 +105,57 @@ jobs:
           dotnet restore "${{ steps.dotnet.outputs.target }}"
 
       - name: Generate SCIP index
-        working-directory: ${{ steps.dotnet.outputs.root }}
-        run: |
-          echo "Running SCIP from:"
-          pwd
-
-          scip-dotnet index
-
-          echo "Directory contents after indexing:"
-          ls -lah
-
-      - name: Verify index.scip
         shell: bash
         run: |
-          INDEX="${{ steps.dotnet.outputs.root }}/index.scip"
+          echo "Repository root:"
+          pwd
 
-          echo "Expected SCIP index:"
-          echo "$INDEX"
+          echo "Selected index root:"
+          echo "${{ steps.dotnet.outputs.root }}"
 
-          if [ ! -f "$INDEX" ]; then
+          echo "Available solution/project files:"
+          find . \
+            -maxdepth 3 \
+            -not -path "./.git/*" \
+            -not -path "./.aava/*" \
+            \( \
+              -name "*.sln" \
+              -o -name "*.slnx" \
+              -o -name "*.csproj" \
+              -o -name "*.vbproj" \
+            \) \
+            -print
+
+          scip-dotnet index \
+            --working-directory "${{ steps.dotnet.outputs.root }}"
+
+      - name: Locate generated index.scip
+        id: scip
+        shell: bash
+        run: |
+          echo "Searching for generated index.scip..."
+
+          INDEX=$(find . \
+            -not -path "./.git/*" \
+            -name "index.scip" \
+            -print \
+            | head -n 1)
+
+          if [ -z "$INDEX" ]; then
             echo "ERROR: index.scip was not generated"
             exit 1
           fi
 
-          echo "SCIP index successfully generated"
+          echo "SCIP index found:"
+          echo "$INDEX"
 
           ls -lh "$INDEX"
+
+          echo "index=$INDEX" >> "$GITHUB_OUTPUT"
 
       - name: Upload SCIP index
         uses: actions/upload-artifact@v4
         with:
           name: index-scip
-          path: ${{ steps.dotnet.outputs.root }}/index.scip
+          path: ${{ steps.scip.outputs.index }}
           if-no-files-found: error
