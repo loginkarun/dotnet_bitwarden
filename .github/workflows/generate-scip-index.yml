@@ -10,7 +10,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   generate-scip:
@@ -120,21 +120,7 @@ jobs:
             -print | sort
 
       # ------------------------------------------------------------
-      # 6. Select or construct a SCIP-compatible solution
-      #
-      # scip-dotnet currently understands:
-      #
-      #   .sln
-      #   .csproj
-      #   .vbproj
-      #
-      # but not .slnx.
-      #
-      # Therefore:
-      #
-      # 1. Use existing .sln if available.
-      # 2. Otherwise dynamically create a traditional .sln
-      #    containing discovered projects.
+      # 6. Select or construct SCIP-compatible solution
       # ------------------------------------------------------------
 
       - name: Prepare SCIP target
@@ -157,10 +143,6 @@ jobs:
             | sort \
             | head -n 1)
 
-          # --------------------------------------------------------
-          # Existing .sln found
-          # --------------------------------------------------------
-
           if [ -n "$EXISTING_SLN" ]; then
 
             echo "Existing SCIP-compatible solution found:"
@@ -172,25 +154,12 @@ jobs:
             exit 0
           fi
 
-          # --------------------------------------------------------
-          # No .sln exists.
-          #
-          # This covers repositories containing:
-          #
-          #   *.slnx
-          #
-          # or simply multiple *.csproj / *.vbproj files.
-          # --------------------------------------------------------
-
           echo ""
           echo "No traditional .sln found."
           echo "Creating temporary SCIP-compatible solution..."
 
           mkdir -p .aava-temp
 
-          # Force traditional .sln format.
-          # This is important on newer .NET SDKs where `dotnet new sln`
-          # may otherwise default to .slnx.
           dotnet new sln \
             --name aava-index \
             --format sln \
@@ -206,15 +175,6 @@ jobs:
           echo ""
           echo "Temporary solution:"
           echo "$TEMP_SOLUTION"
-
-          # --------------------------------------------------------
-          # Find all C# / VB projects recursively.
-          #
-          # Exclude generated/dependency directories only.
-          #
-          # We intentionally keep test projects because this is a
-          # whole-repository code intelligence index.
-          # --------------------------------------------------------
 
           mapfile -t PROJECTS < <(
             find . \
@@ -240,10 +200,6 @@ jobs:
             echo "ERROR: No .csproj or .vbproj files were found."
             exit 1
           fi
-
-          # --------------------------------------------------------
-          # Add every project to temporary traditional solution
-          # --------------------------------------------------------
 
           ADDED=0
 
@@ -292,7 +248,7 @@ jobs:
           echo "${{ steps.sciptarget.outputs.temporary }}"
 
       # ------------------------------------------------------------
-      # 8. Restore solution/projects
+      # 8. Restore dependencies
       # ------------------------------------------------------------
 
       - name: Restore .NET dependencies
@@ -308,7 +264,7 @@ jobs:
           dotnet restore "$TARGET"
 
       # ------------------------------------------------------------
-      # 9. Remove any old locally generated index
+      # 9. Remove old temporary SCIP output
       # ------------------------------------------------------------
 
       - name: Remove old SCIP output
@@ -408,27 +364,94 @@ jobs:
           echo "size=$SIZE" >> "$GITHUB_OUTPUT"
 
       # ------------------------------------------------------------
-      # 12. Upload index.scip
-      #
-      # For this step we are intentionally using an Actions artifact.
-      # Once indexing is confirmed working, we can change this to:
-      #
-      #   .aava/index.scip
-      #   .aava/index-metadata.json
-      #
-      # and commit them to the requested branch.
+      # 12. Persist SCIP index under repo-root/.aava
       # ------------------------------------------------------------
 
-      - name: Upload SCIP index
-        uses: actions/upload-artifact@v4
-        with:
-          name: index-scip-${{ inputs.branch }}
-          path: ${{ steps.scip.outputs.index }}
-          if-no-files-found: error
-          retention-days: 7
+      - name: Create .aava folder
+        shell: bash
+        run: |
+          mkdir -p .aava
+
+      - name: Copy SCIP index to .aava
+        shell: bash
+        run: |
+          cp "${{ steps.scip.outputs.index }}" .aava/index.scip
+
+          echo "Persistent SCIP index:"
+          ls -lh .aava/index.scip
 
       # ------------------------------------------------------------
-      # 13. Final summary
+      # 13. Create metadata
+      # ------------------------------------------------------------
+
+      - name: Create index metadata
+        shell: bash
+        run: |
+          SOURCE_SHA=$(git rev-parse HEAD)
+
+          cat > .aava/index-metadata.json <<EOF
+          {
+            "repoName": "${{ github.event.repository.name }}",
+            "branch": "${{ inputs.branch }}",
+            "sourceCommitSha": "$SOURCE_SHA",
+            "indexer": "scip-dotnet",
+            "indexPath": ".aava/index.scip",
+            "indexSizeBytes": ${{ steps.scip.outputs.size }},
+            "scipTarget": "${{ steps.sciptarget.outputs.target }}"
+          }
+          EOF
+
+          echo "Index metadata:"
+          cat .aava/index-metadata.json
+
+      # ------------------------------------------------------------
+      # 14. Commit and push index to same branch
+      # ------------------------------------------------------------
+
+      - name: Commit SCIP index to branch
+        id: commitindex
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "aava-indexer"
+          git config user.email "aava-indexer@users.noreply.github.com"
+
+          git add .aava/index.scip
+          git add .aava/index-metadata.json
+
+          if git diff --cached --quiet; then
+            echo "No SCIP index changes to commit."
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "chore(aava): refresh SCIP code index"
+
+          git push origin HEAD:${{ inputs.branch }}
+
+          echo "committed=true" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------
+      # 15. Verify persisted files
+      # ------------------------------------------------------------
+
+      - name: Verify persisted index
+        shell: bash
+        run: |
+          echo "Contents of .aava:"
+          ls -lah .aava
+
+          echo ""
+          echo "Index:"
+          ls -lh .aava/index.scip
+
+          echo ""
+          echo "Metadata:"
+          cat .aava/index-metadata.json
+
+      # ------------------------------------------------------------
+      # 16. Final summary
       # ------------------------------------------------------------
 
       - name: Index summary
@@ -438,6 +461,10 @@ jobs:
           echo "SCIP INDEX SUCCESS"
           echo "========================================"
 
+          echo "Repository:"
+          echo "${{ github.event.repository.name }}"
+
+          echo ""
           echo "Branch:"
           echo "${{ inputs.branch }}"
 
@@ -446,13 +473,17 @@ jobs:
           echo "${{ steps.sciptarget.outputs.target }}"
 
           echo ""
-          echo "Generated index:"
-          echo "${{ steps.scip.outputs.index }}"
+          echo "Persistent index:"
+          echo ".aava/index.scip"
+
+          echo ""
+          echo "Metadata:"
+          echo ".aava/index-metadata.json"
 
           echo ""
           echo "Index size:"
           echo "${{ steps.scip.outputs.size }} bytes"
 
           echo ""
-          echo "Artifact:"
-          echo "index-scip-${{ inputs.branch }}"
+          echo "Committed:"
+          echo "${{ steps.commitindex.outputs.committed }}"
