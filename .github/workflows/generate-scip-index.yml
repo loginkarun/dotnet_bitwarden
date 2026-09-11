@@ -12,8 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  checkout:
-    name: Checkout Repository
+  verify-tools:
     runs-on: ubuntu-latest
 
     steps:
@@ -23,17 +22,22 @@ jobs:
           ref: ${{ inputs.branch }}
           fetch-depth: 0
 
-      - name: Verify checkout
+      - name: Show branch and commit
         run: |
-          echo "Requested branch: ${{ inputs.branch }}"
-          echo "Current branch:"
+          echo "Branch:"
           git branch --show-current
 
-          echo "Current commit:"
+          echo "Commit:"
           git rev-parse HEAD
 
-          echo "Repository root:"
-          pwd
+      - name: Show .NET environment
+        run: |
+          dotnet --info
 
-          echo "Top-level files:"
-          ls -la
+      - name: Install scip-dotnet
+        run: |
+          dotnet tool install --global scip-dotnet
+
+      - name: Verify scip-dotnet
+        run: |
+          scip-dotnet --version
