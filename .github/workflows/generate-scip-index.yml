@@ -46,31 +46,23 @@ jobs:
         run: |
           echo "Looking for solution files..."
 
-          find . \
-            -not -path "./.git/*" \
-            -not -path "./.aava/*" \
-            -name "*.sln" \
-            -print
-
           SOLUTION=$(find . \
             -not -path "./.git/*" \
             -not -path "./.aava/*" \
-            -name "*.sln" \
-            -print \
-            | head -n 1)
+            \( -name "*.sln" -o -name "*.slnx" \) \
+            -print 2>/dev/null | head -n 1)
 
           if [ -z "$SOLUTION" ]; then
-            echo "No .sln found. Looking for .csproj..."
+            echo "No .sln or .slnx found. Looking for .csproj..."
 
             PROJECT=$(find . \
               -not -path "./.git/*" \
               -not -path "./.aava/*" \
               -name "*.csproj" \
-              -print \
-              | head -n 1)
+              -print 2>/dev/null | head -n 1)
 
             if [ -z "$PROJECT" ]; then
-              echo "ERROR: No .sln or .csproj found"
+              echo "ERROR: No .sln, .slnx, or .csproj found"
               exit 1
             fi
 
