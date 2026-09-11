@@ -1,0 +1,39 @@
+name: Generate SCIP Index
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to index"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  checkout:
+    name: Checkout Repository
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout requested branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+
+      - name: Verify checkout
+        run: |
+          echo "Requested branch: ${{ inputs.branch }}"
+          echo "Current branch:"
+          git branch --show-current
+
+          echo "Current commit:"
+          git rev-parse HEAD
+
+          echo "Repository root:"
+          pwd
+
+          echo "Top-level files:"
+          ls -la
